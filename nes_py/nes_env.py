@@ -4,9 +4,9 @@ import glob
 import itertools
 import os
 import sys
-import gym
-from gym.spaces import Box
-from gym.spaces import Discrete
+import gymnasium as gym
+from gymnasium.spaces import Box
+from gymnasium.spaces import Discrete
 import numpy as np
 from ._rom import ROM
 from ._image_viewer import ImageViewer
@@ -86,6 +86,8 @@ class NESEnv(gym.Env):
     # relevant meta-data about the environment
     metadata = {
         'render.modes': ['rgb_array', 'human'],
+        'render_modes': ['rgb_array', 'human'],
+        'render_fps': 50,
         'video.frames_per_second': 60
     }
 
@@ -270,7 +272,7 @@ class NESEnv(gym.Env):
         # set the done flag to false
         self.done = False
         # return the screen from the emulator
-        return self.screen
+        return self.screen, {}
 
     def _did_reset(self):
         """Handle any RAM hacking after a reset occurs."""
@@ -312,7 +314,8 @@ class NESEnv(gym.Env):
         elif reward > self.reward_range[1]:
             reward = self.reward_range[1]
         # return the screen from the emulator and other relevant data
-        return self.screen, reward, self.done, info
+        truncated = False
+        return self.screen, reward, self.done, truncated, info
 
     def _get_reward(self):
         """Return the reward after a step occurs."""
