@@ -58,6 +58,9 @@ _LIB.Restore.restype = None
 # setup the argument and return types for Close
 _LIB.Close.argtypes = [ctypes.c_void_p]
 _LIB.Close.restype = None
+# setup the argument and return types for SetPPUParameter
+_LIB.SetPPUParameter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+_LIB.SetPPUParameter.restype = None
 
 
 # height in pixels of the NES screen
@@ -82,6 +85,8 @@ CONTROLLER_VECTOR = ctypes.c_byte * 1
 
 class NESEnv(gym.Env):
     """An NES environment based on the LaiNES emulator."""
+
+    PPUPARAM_UNLIMIT_SPRITE = 1
 
     # relevant meta-data about the environment
     metadata = {
@@ -427,6 +432,9 @@ class NESEnv(gym.Env):
     def get_action_meanings(self):
         """Return a list of actions meanings."""
         return ['NOOP']
+
+    def set_ppu_parameter(self, key, value):
+        _LIB.SetPPUParameter(self._env, key, value)
 
 
 # explicitly define the outward facing API of this module

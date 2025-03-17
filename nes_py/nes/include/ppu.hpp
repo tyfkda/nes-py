@@ -103,9 +103,12 @@ class PPU {
     /// the number of visible scan line dots
     NES_Pixel screen[VISIBLE_SCANLINES][SCANLINE_VISIBLE_DOTS];
 
+    // Parameter.
+    bool unlimit_sprite;
+
  public:
     /// Initialize a new PPU.
-    PPU() : sprite_memory(64 * 4) { }
+    PPU() : sprite_memory(64 * 4), unlimit_sprite(false) { }
 
     /// Perform a single cycle on the PPU.
     void cycle(PictureBus& bus);
@@ -182,6 +185,14 @@ class PPU {
 
     /// Return a pointer to the screen buffer.
     inline NES_Pixel* get_screen_buffer() { return *screen; }
+
+    /// Parameter.
+    enum class PARAM {
+        UNLIMIT_SPRITE = 1,
+    };
+
+    /// Set parameter.
+    void set_parameter(PARAM key, int value);
 };
 
 }  // namespace NES

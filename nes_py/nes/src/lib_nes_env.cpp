@@ -81,6 +81,11 @@ extern "C" {
     EXP void Close(NES::Emulator* emu) {
         delete emu;
     }
+
+    /// Set PPU parameter
+    EXP void SetPPUParameter(NES::Emulator* emu, int key, int value) {
+        emu->set_ppu_parameter(key, value);
+    }
 }
 
 // un-define the macro

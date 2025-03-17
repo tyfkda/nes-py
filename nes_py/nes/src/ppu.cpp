@@ -228,7 +228,8 @@ void PPU::cycle(PictureBus& bus) {
                     auto diff = (scanline - sprite_memory[i * 4]);
                     if (0 <= diff && diff < range) {
                         scanline_sprites.push_back(i);
-                        if (++j >= 8)
+                        ++j;
+                        if (!unlimit_sprite && j >= 8)
                             break;
                     }
                 }
@@ -364,6 +365,12 @@ void PPU::set_scroll(NES_Byte scroll) {
         temp_address &= ~0x73e0;
         temp_address |= ((scroll & 0x7) << 12) | ((scroll & 0xf8) << 2);
         is_first_write = true;
+    }
+}
+
+void PPU::set_parameter(PARAM key, int value) {
+    switch (key) {
+    case PARAM::UNLIMIT_SPRITE:  unlimit_sprite = value; break;
     }
 }
 

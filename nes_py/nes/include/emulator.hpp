@@ -101,6 +101,9 @@ class Emulator {
         cpu = backup_cpu;
         ppu = backup_ppu;
     }
+
+    /// Set PPU parameter.
+    inline void set_ppu_parameter(int key, int value) { ppu.set_parameter((NES::PPU::PARAM)key, value); }
 };
 
 }  // namespace NES
