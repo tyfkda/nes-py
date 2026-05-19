@@ -1,99 +1,57 @@
-"""A CTypes interface to the C++ NES environment."""
-import ctypes
-import glob
+"""A Python interface to the Cython native NES environment."""
 import itertools
-import os
-import sys
+import warnings
+
 import gymnasium as gym
 from gymnasium.spaces import Box
 from gymnasium.spaces import Discrete
+from gymnasium.utils import seeding
 import numpy as np
 from ._rom import ROM
 from ._image_viewer import ImageViewer
+from . import _native
+from .ram import normalize_ram_read_specs
 
 
-# the path to the directory this file is in
-_MODULE_PATH = os.path.dirname(__file__)
-# the pattern to find the C++ shared object library
-_SO_PATH = 'lib_nes_env*'
-# the absolute path to the C++ shared object library
-_LIB_PATH = os.path.join(_MODULE_PATH, _SO_PATH)
-# load the library from the shared object file
-try:
-    _LIB = ctypes.cdll.LoadLibrary(glob.glob(_LIB_PATH)[0])
-except IndexError:
-    raise OSError('missing static lib_nes_env*.so library!')
+def _native_cartridge_error(rom_path):
+    """Return the native cartridge validation error for a ROM path, if any."""
+    return _native.cartridge_error(rom_path)
 
 
-# setup the argument and return types for Width
-_LIB.Width.argtypes = None
-_LIB.Width.restype = ctypes.c_uint
-# setup the argument and return types for Height
-_LIB.Height.argtypes = None
-_LIB.Height.restype = ctypes.c_uint
-# setup the argument and return types for Initialize
-_LIB.Initialize.argtypes = [ctypes.c_wchar_p]
-_LIB.Initialize.restype = ctypes.c_void_p
-# setup the argument and return types for Controller
-_LIB.Controller.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-_LIB.Controller.restype = ctypes.c_void_p
-# setup the argument and return types for Screen
-_LIB.Screen.argtypes = [ctypes.c_void_p]
-_LIB.Screen.restype = ctypes.c_void_p
-# setup the argument and return types for GetMemoryBuffer
-_LIB.Memory.argtypes = [ctypes.c_void_p]
-_LIB.Memory.restype = ctypes.c_void_p
-# setup the argument and return types for Reset
-_LIB.Reset.argtypes = [ctypes.c_void_p]
-_LIB.Reset.restype = None
-# setup the argument and return types for Step
-_LIB.Step.argtypes = [ctypes.c_void_p]
-_LIB.Step.restype = None
-# setup the argument and return types for Backup
-_LIB.Backup.argtypes = [ctypes.c_void_p]
-_LIB.Backup.restype = None
-# setup the argument and return types for Restore
-_LIB.Restore.argtypes = [ctypes.c_void_p]
-_LIB.Restore.restype = None
-# setup the argument and return types for Close
-_LIB.Close.argtypes = [ctypes.c_void_p]
-_LIB.Close.restype = None
-# setup the argument and return types for SetPPUParameter
-_LIB.SetPPUParameter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
-_LIB.SetPPUParameter.restype = None
+def _native_cartridge_metadata(rom_path):
+    """Return parsed native cartridge metadata for a ROM path."""
+    return _native.cartridge_metadata(rom_path)
+
+
+def _is_mapper_supported(mapper):
+    """Return whether a mapper ID has a native implementation."""
+    return _native.is_mapper_supported(mapper)
 
 
 # height in pixels of the NES screen
-SCREEN_HEIGHT = _LIB.Height()
+SCREEN_HEIGHT = _native.SCREEN_HEIGHT
 # width in pixels of the NES screen
-SCREEN_WIDTH = _LIB.Width()
+SCREEN_WIDTH = _native.SCREEN_WIDTH
 # shape of the screen as 24-bit RGB (standard for NumPy)
 SCREEN_SHAPE_24_BIT = SCREEN_HEIGHT, SCREEN_WIDTH, 3
 # shape of the screen as 32-bit RGB (C++ memory arrangement)
 SCREEN_SHAPE_32_BIT = SCREEN_HEIGHT, SCREEN_WIDTH, 4
-# create a type for the screen tensor matrix from C++
-SCREEN_TENSOR = ctypes.c_byte * int(np.prod(SCREEN_SHAPE_32_BIT))
+# shape of a grayscale screen observation
+SCREEN_SHAPE_GRAYSCALE = SCREEN_HEIGHT, SCREEN_WIDTH
 
 
-# create a type for the RAM vector from C++
-RAM_VECTOR = ctypes.c_byte * 0x800
-
-
-# create a type for the controller buffers from C++
-CONTROLLER_VECTOR = ctypes.c_byte * 1
+OBSERVATION_MODE_RGB_ARRAY = 'rgb_array'
+OBSERVATION_MODE_RGB_ARRAY_CONTIGUOUS = 'rgb_array_contiguous'
+OBSERVATION_MODE_GRAYSCALE = 'grayscale'
 
 
 class NESEnv(gym.Env):
     """An NES environment based on the LaiNES emulator."""
 
-    PPUPARAM_UNLIMIT_SPRITE = 1
-
     # relevant meta-data about the environment
     metadata = {
-        'render.modes': ['rgb_array', 'human'],
         'render_modes': ['rgb_array', 'human'],
-        'render_fps': 50,
-        'video.frames_per_second': 60
+        'render_fps': 60,
     }
 
     # the legal range for rewards for this environment
@@ -110,17 +68,25 @@ class NESEnv(gym.Env):
     # action space is a bitmap of button press values for the 8 NES buttons
     action_space = Discrete(256)
 
-    def __init__(self, rom_path):
+    def __init__(self, rom_path, render_mode=None):
         """
         Create a new NES environment.
 
         Args:
             rom_path (str): the path to the ROM for the environment
+            render_mode (str): the render mode to use, if any
 
         Returns:
             None
 
         """
+        if (
+            render_mode is not None and
+            render_mode not in self.metadata['render_modes']
+        ):
+            render_modes = [repr(x) for x in self.metadata['render_modes']]
+            msg = 'valid render modes are: {}'.format(', '.join(render_modes))
+            raise NotImplementedError(msg)
         # create a ROM file from the ROM path
         rom = ROM(rom_path)
         # check that there is PRG ROM
@@ -137,15 +103,14 @@ class NESEnv(gym.Env):
         if rom.is_pal:
             raise ValueError('ROM is PAL. PAL is not supported.')
         # check that the mapper is implemented
-        elif rom.mapper not in {0, 1, 2, 3}:
+        elif not _is_mapper_supported(rom.mapper):
             msg = 'ROM has an unsupported mapper number {}. please see https://github.com/Kautenja/nes-py/issues/28 for more information.'
             raise ValueError(msg.format(rom.mapper))
-        # create a dedicated random number generator for the environment
-        self.np_random = np.random.RandomState()
         # store the ROM path
         self._rom_path = rom_path
+        self.render_mode = render_mode
         # initialize the C++ object for running the environment
-        self._env = _LIB.Initialize(self._rom_path)
+        self._env = _native.NativeEmulator(self._rom_path)
         # setup a placeholder for a 'human' render mode viewer
         self.viewer = None
         # setup a placeholder for a pointer to a backup state
@@ -159,29 +124,37 @@ class NESEnv(gym.Env):
 
     def _screen_buffer(self):
         """Setup the screen buffer from the C++ code."""
-        # get the address of the screen
-        address = _LIB.Screen(self._env)
-        # create a buffer from the contents of the address location
-        buffer_ = ctypes.cast(address, ctypes.POINTER(SCREEN_TENSOR)).contents
-        # create a NumPy array from the buffer
-        screen = np.frombuffer(buffer_, dtype='uint8')
-        # reshape the screen from a column vector to a tensor
-        screen = screen.reshape(SCREEN_SHAPE_32_BIT)
-        # flip the bytes if the machine is little-endian (which it likely is)
-        if sys.byteorder == 'little':
-            # invert the little-endian BGRx channels to big-endian xRGB
-            screen = screen[:, :, ::-1]
-        # remove the 0th axis (padding from storing colors in 32 bit)
-        return screen[:, :, 1:]
+        return self._env.screen_buffer()
+
+    def observation(self, mode=OBSERVATION_MODE_RGB_ARRAY, output=None):
+        """
+        Return the current screen using an explicit observation mode.
+
+        The default mode returns the same zero-copy view as ``self.screen``.
+        Copy modes return C-contiguous ``uint8`` arrays and may write into the
+        optional ``output`` array to support allocation-free ML loops.
+        """
+        if mode == OBSERVATION_MODE_RGB_ARRAY:
+            return self.screen
+        if self._env is None:
+            raise ValueError('env has already been closed.')
+        if mode == OBSERVATION_MODE_RGB_ARRAY_CONTIGUOUS:
+            return self._env.copy_screen_rgb(output)
+        if mode == OBSERVATION_MODE_GRAYSCALE:
+            return self._env.copy_screen_grayscale(output)
+        modes = (
+            OBSERVATION_MODE_RGB_ARRAY,
+            OBSERVATION_MODE_RGB_ARRAY_CONTIGUOUS,
+            OBSERVATION_MODE_GRAYSCALE,
+        )
+        msg = 'valid observation modes are: {}'.format(
+            ', '.join(repr(mode) for mode in modes)
+        )
+        raise NotImplementedError(msg)
 
     def _ram_buffer(self):
         """Setup the RAM buffer from the C++ code."""
-        # get the address of the RAM
-        address = _LIB.Memory(self._env)
-        # create a buffer from the contents of the address location
-        buffer_ = ctypes.cast(address, ctypes.POINTER(RAM_VECTOR)).contents
-        # create a NumPy array from the buffer
-        return np.frombuffer(buffer_, dtype='uint8')
+        return self._env.ram_buffer()
 
     def _controller_buffer(self, port):
         """
@@ -194,12 +167,27 @@ class NESEnv(gym.Env):
             a NumPy buffer with the controller's binary data
 
         """
-        # get the address of the controller
-        address = _LIB.Controller(self._env, port)
-        # create a memory buffer using the ctypes pointer for this vector
-        buffer_ = ctypes.cast(address, ctypes.POINTER(CONTROLLER_VECTOR)).contents
-        # create a NumPy buffer from the binary data and return it
-        return np.frombuffer(buffer_, dtype='uint8')
+        return self._env.controller_buffer(port)
+
+    def _mapper_number(self):
+        """Return the active native mapper number."""
+        return self._env.mapper_number()
+
+    def _prg_rom_size(self):
+        """Return the native PRG ROM size in bytes."""
+        return self._env.prg_rom_size()
+
+    def _chr_rom_size(self):
+        """Return the native CHR ROM size in bytes."""
+        return self._env.chr_rom_size()
+
+    def _has_chr_ram(self):
+        """Return whether the active native mapper uses CHR RAM."""
+        return self._env.has_chr_ram()
+
+    def _name_table_mirroring(self):
+        """Return the active native mapper name table mirroring mode."""
+        return self._env.name_table_mirroring()
 
     def _frame_advance(self, action):
         """
@@ -212,19 +200,41 @@ class NESEnv(gym.Env):
             None
 
         """
-        # set the action on the controller
-        self.controllers[0][:] = action
-        # perform a step on the emulator
-        _LIB.Step(self._env)
+        self._env.frame_advance(action)
 
     def _backup(self):
         """Backup the NES state in the emulator."""
-        _LIB.Backup(self._env)
+        self._env.backup()
         self._has_backup = True
 
     def _restore(self):
         """Restore the backup state into the NES emulator."""
-        _LIB.Restore(self._env)
+        self._env.restore()
+
+    def dump_state(self):
+        """Return an opaque snapshot of the native emulator state."""
+        if self._env is None:
+            raise ValueError('env has already been closed.')
+        return self._env.dump_state()
+
+    def load_state(self, snapshot):
+        """Restore the native emulator from an opaque state snapshot."""
+        if self._env is None:
+            raise ValueError('env has already been closed.')
+        self._env.load_state(snapshot)
+        self.done = False
+
+    def ram_values(self, specs, output=None):
+        """Read configured RAM values into a reusable uint32 array."""
+        if self._env is None:
+            raise ValueError('env has already been closed.')
+        addresses, sizes, encodings = normalize_ram_read_specs(specs)
+        return self._env.read_ram_values(
+            addresses,
+            sizes,
+            encodings,
+            output,
+        )
 
     def _will_reset(self):
         """Handle any RAM hacking after a reset occurs."""
@@ -242,42 +252,43 @@ class NESEnv(gym.Env):
               this won't be true if seed=None, for example.
 
         """
-        # if there is no seed, return an empty list
-        if seed is None:
-            return []
-        # set the random number seed for the NumPy random number generator
-        self.np_random.seed(seed)
+        warnings.warn(
+            'NESEnv.seed() is deprecated; use reset(seed=...) instead.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._np_random, self._np_random_seed = seeding.np_random(seed)
         # return the list of seeds used by RNG(s) in the environment
-        return [seed]
+        return [self._np_random_seed]
 
-    def reset(self, seed=None, options=None, return_info=None):
+    def reset(self, *, seed=None, options=None):
         """
-        Reset the state of the environment and returns an initial observation.
+        Reset the state of the environment and return an initial observation.
 
         Args:
             seed (int): an optional random number seed for the next episode
             options (any): unused
-            return_info (any): unused
 
         Returns:
-            state (np.ndarray): next frame as a result of the given action
+            a tuple of:
+            - state (np.ndarray): initial frame for the episode
+            - info (dict): auxiliary diagnostic information
 
         """
-        # Set the seed.
-        self.seed(seed)
+        super().reset(seed=seed)
         # call the before reset callback
         self._will_reset()
         # reset the emulator
         if self._has_backup:
             self._restore()
         else:
-            _LIB.Reset(self._env)
+            self._env.reset()
         # call the after reset callback
         self._did_reset()
         # set the done flag to false
         self.done = False
-        # return the screen from the emulator
-        return self.screen, {}
+        # return the screen from the emulator and reset metadata
+        return self.screen, self._get_info()
 
     def _did_reset(self):
         """Handle any RAM hacking after a reset occurs."""
@@ -294,21 +305,22 @@ class NESEnv(gym.Env):
             a tuple of:
             - state (np.ndarray): next frame as a result of the given action
             - reward (float) : amount of reward returned after given action
-            - done (boolean): whether the episode has ended
+            - terminated (boolean): whether the episode has terminated
+            - truncated (boolean): whether an external limit truncated it
             - info (dict): contains auxiliary diagnostic information
 
         """
         # if the environment is done, raise an error
         if self.done:
             raise ValueError('cannot step in a done environment! call `reset`')
-        # set the action on the controller
-        self.controllers[0][:] = action
         # pass the action to the emulator as an unsigned byte
-        _LIB.Step(self._env)
+        self._env.frame_advance(action)
         # get the reward for this step
         reward = float(self._get_reward())
-        # get the done flag for this step
-        self.done = bool(self._get_done())
+        # get the termination and truncation flags for this step
+        terminated = bool(self._get_terminated())
+        truncated = bool(self._get_truncated())
+        self.done = terminated or truncated
         # get the info for this step
         info = self._get_info()
         # call the after step callback
@@ -319,15 +331,27 @@ class NESEnv(gym.Env):
         elif reward > self.reward_range[1]:
             reward = self.reward_range[1]
         # return the screen from the emulator and other relevant data
-        truncated = False
-        return self.screen, reward, self.done, truncated, info
+        return self.screen, reward, terminated, truncated, info
 
     def _get_reward(self):
         """Return the reward after a step occurs."""
         return 0
 
+    def _get_terminated(self):
+        """
+        Return True if the episode has naturally terminated.
+
+        The legacy ``_get_done`` hook remains as a compatibility bridge for
+        downstream game wrappers until they migrate to ``_get_terminated``.
+        """
+        return self._get_done()
+
+    def _get_truncated(self):
+        """Return True if an external limit truncated the episode."""
+        return False
+
     def _get_done(self):
-        """Return True if the episode is over, False otherwise."""
+        """Deprecated bridge for old subclasses; override _get_terminated."""
         return False
 
     def _get_info(self):
@@ -352,29 +376,25 @@ class NESEnv(gym.Env):
         # make sure the environment hasn't already been closed
         if self._env is None:
             raise ValueError('env has already been closed.')
-        # purge the environment from C++ memory
-        _LIB.Close(self._env)
+        # close native operations
+        self._env.close()
         # deallocate the object locally
         self._env = None
         # if there is an image viewer open, delete it
         if self.viewer is not None:
             self.viewer.close()
 
-    def render(self, mode='human'):
+    def render(self):
         """
         Render the environment.
 
-        Args:
-            mode (str): the mode to render with:
-            - human: render to the current display
-            - rgb_array: Return an numpy.ndarray with shape (x, y, 3),
-              representing RGB values for an x-by-y pixel image
-
         Returns:
-            a numpy array if mode is 'rgb_array', None otherwise
+            a numpy array if render_mode is 'rgb_array', None otherwise
 
         """
-        if mode == 'human':
+        if self.render_mode is None:
+            return None
+        if self.render_mode == 'human':
             # if the viewer isn't setup, import it and create one
             if self.viewer is None:
                 # get the caption for the ImageViewer
@@ -382,7 +402,7 @@ class NESEnv(gym.Env):
                     # if there is no spec, just use the .nes filename
                     caption = self._rom_path.split('/')[-1]
                 else:
-                    # set the caption to the OpenAI Gym id
+                    # set the caption to the Gymnasium id
                     caption = self.spec.id
                 # create the ImageViewer to display frames
                 self.viewer = ImageViewer(
@@ -392,11 +412,11 @@ class NESEnv(gym.Env):
                 )
             # show the screen on the image viewer
             self.viewer.show(self.screen)
-        elif mode == 'rgb_array':
+        elif self.render_mode == 'rgb_array':
             return self.screen
         else:
             # unpack the modes as comma delineated strings ('a', 'b', ...)
-            render_modes = [repr(x) for x in self.metadata['render.modes']]
+            render_modes = [repr(x) for x in self.metadata['render_modes']]
             msg = 'valid render modes are: {}'.format(', '.join(render_modes))
             raise NotImplementedError(msg)
 
@@ -433,8 +453,12 @@ class NESEnv(gym.Env):
         """Return a list of actions meanings."""
         return ['NOOP']
 
+    #
+
+    PPUPARAM_UNLIMIT_SPRITE = 1
+
     def set_ppu_parameter(self, key, value):
-        _LIB.SetPPUParameter(self._env, key, value)
+        self._env.set_ppu_parameter(key, value)
 
 
 # explicitly define the outward facing API of this module
